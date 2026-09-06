@@ -1,0 +1,6 @@
+{
+  "name": "Xiaomi LYWSD02 Clock",
+  "render_readme": true,
+  "homeassistant": "2024.8.0",
+  "zip_release": false
+}

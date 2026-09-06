@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "confirm": {
+        "description": "Set up {name} ({address})?\n\nTemperature and humidity keep coming from Xiaomi BLE. This adds time sync plus the 12/24-hour and \u00b0C/\u00b0F settings."
+      },
+      "user": {
+        "data": {
+          "address": "Clock"
+        },
+        "description": "Pick a LYWSD02 the Bluetooth proxies can currently reach."
+      }
+    },
+    "abort": {
+      "already_configured": "This clock is already set up.",
+      "no_devices_found": "No LYWSD02 clock is currently visible to a connectable proxy.",
+      "not_supported": "That device is not a LYWSD02."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "sync_interval_hours": "Hours between time syncs",
+          "drift_tolerance_seconds": "Read-back tolerance (seconds)"
+        },
+        "description": "A sync also runs whenever the UTC offset changes, so DST is handled without waiting for the interval."
+      }
+    }
+  }
+}

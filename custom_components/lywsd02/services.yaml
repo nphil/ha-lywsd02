@@ -1,0 +1,25 @@
+dump_gatt:
+  name: Dump GATT table
+  description: >-
+    Connect to a clock and log its full service/characteristic table, including
+    the value and length of every readable characteristic. Use this when a write
+    is rejected: firmware revisions differ and the published protocol notes are
+    reverse-engineered guesses.
+  fields:
+    address:
+      name: Bluetooth address
+      description: MAC of the clock, e.g. E7:2E:01:82:D0:EB
+      required: true
+      selector:
+        text:
+
+write_char:
+  name: Write characteristic (advanced)
+  description: >-
+    Write a raw payload to one GATT characteristic and log the value before and
+    after. For identifying undocumented display registers; every probe is
+    reversible because the previous value is logged.
+  fields:
+    address: {name: Bluetooth address, required: true, selector: {text: }}
+    uuid: {name: Characteristic UUID, required: true, selector: {text: }}
+    payload: {name: Payload (hex), required: true, selector: {text: }}
