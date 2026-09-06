@@ -170,4 +170,8 @@ Built on prior reverse engineering by
 [whoisnotthere/LYWSD02-Reading-and-changing-data](https://github.com/whoisnotthere/LYWSD02-Reading-and-changing-data)
 and [koenvervloesem/bluetooth-clocks](https://github.com/koenvervloesem/bluetooth-clocks).
 
+The shipped icon is a transparent PNG on purpose: Home Assistant renders integration
+icons inside its own light card, so a full-bleed coloured tile reads as a sticker in a
+frame. Verified against both a white and a dark card.
+
 MIT licensed.
