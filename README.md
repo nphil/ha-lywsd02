@@ -1,4 +1,4 @@
-<img src="brand/icon.png" alt="" width="96" align="right">
+<img src="custom_components/lywsd02/brand/icon.png" alt="" width="96" align="right">
 
 # Xiaomi LYWSD02 Clock
 
