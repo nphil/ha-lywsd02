@@ -32,6 +32,16 @@ class _Module(types.ModuleType):
         return value
 
 
+class ConfigEntryNotReady(Exception):
+    pass
+
+
+class HassJob:
+    def __init__(self, target, name=None) -> None:
+        self.target = target
+        self.name = name
+
+
 class _Store:
     stored: dict | None = None
 
@@ -84,6 +94,9 @@ def _install_stubs() -> None:
         "homeassistant.const",
         "homeassistant.core",
         "homeassistant.helpers",
+        "homeassistant.exceptions",
+        "homeassistant.helpers.config_validation",
+        "homeassistant.helpers.typing",
         "homeassistant.helpers.device_registry",
         "homeassistant.helpers.storage",
         "homeassistant.helpers.update_coordinator",
@@ -107,6 +120,8 @@ def _install_stubs() -> None:
     uc.DataUpdateCoordinator = _DataUpdateCoordinator
     uc.CoordinatorEntity = _CoordinatorEntity
     sys.modules["homeassistant.core"].HomeAssistant = object
+    sys.modules["homeassistant.core"].HassJob = HassJob
+    sys.modules["homeassistant.exceptions"].ConfigEntryNotReady = ConfigEntryNotReady
     sys.modules["bleak_retry_connector"].BleakClientWithServiceCache = object
     sys.modules["bleak_retry_connector"].establish_connection = None  # per test
 
@@ -128,3 +143,52 @@ def pkg():
     """The integration package plus its coordinator module."""
     _Store.stored = None
     return sys.modules["lywsd02"], sys.modules["lywsd02.coordinator"]
+
+
+def _build_hass():
+    from unittest.mock import AsyncMock
+
+    hass = MagicMock()
+    hass.data = {}
+    hass.shutdown_jobs = []  # HassJob objects currently registered
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    hass.services.has_service.return_value = True  # skip service registration
+
+    def add_shutdown_job(job):
+        hass.shutdown_jobs.append(job)
+        return lambda: hass.shutdown_jobs.remove(job)
+
+    hass.async_add_shutdown_job = add_shutdown_job
+    return hass
+
+
+def _build_entry():
+    import asyncio
+
+    entry = MagicMock()
+    entry.entry_id = "e1"
+    entry.title = "Clock"
+    entry.data = {"address": "AA:BB:CC:DD:EE:FF"}
+    entry.options = {}
+    entry.tasks = []
+    entry.unload_callbacks = []
+    entry.async_on_unload = entry.unload_callbacks.append
+
+    def create_background_task(hass, coro, name):
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        entry.tasks.append(task)
+        return task
+
+    entry.async_create_background_task = create_background_task
+    return entry
+
+
+@pytest.fixture
+def make_hass():
+    return _build_hass
+
+
+@pytest.fixture
+def make_entry():
+    return _build_entry

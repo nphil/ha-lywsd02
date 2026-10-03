@@ -19,6 +19,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import shutdown
 from .const import (
     CHAR_TIME,
     CHAR_UNITS,
@@ -39,7 +40,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # No single connect / read / write / disconnect may hang longer than this, even
 # though bleak and bleak_retry_connector have no ceiling of their own for
-# several of those calls (startup contract S4).
+# several of those calls (startup contract S4). This is a cancellation-based
+# safety net: bleak's read/write take no timeout argument and
+# establish_connection hard-codes its own per-attempt connect timeout, so there
+# is no shorter backend timeout to pass (S8). The integration never subscribes
+# to notifications, which is the call S8 is chiefly about.
 STEP_TIMEOUT = 10.0
 
 
@@ -76,6 +81,10 @@ class ClockState:
         )
 
 
+class _Latched(Exception):
+    """Home Assistant began shutting down while a sync was connecting."""
+
+
 class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
     """Owns the BLE conversation. Connects only when there is something to do.
 
@@ -95,6 +104,8 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
             name=f"{DOMAIN} {self.address}",
             update_interval=timedelta(minutes=CHECK_INTERVAL_MINUTES),
         )
+        self._client: BleakClientWithServiceCache | None = None
+        self._inflight: set[asyncio.Task] = set()
 
     @property
     def sync_interval(self) -> timedelta:
@@ -174,6 +185,8 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
         is the whole alerting mechanism - swallowing it here would hide a dead
         clock behind an 'unavailable' entity.
         """
+        if shutdown.in_progress(self.hass):
+            return self._state
         due, why = self._sync_due()
         if due:
             _LOGGER.debug("%s: sync due (%s)", self.address, why)
@@ -203,6 +216,50 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
     async def async_sync(
         self, *, reason: str = "manual", units: str | None = None
     ) -> None:
+        """Run one sync unless Home Assistant is shutting down.
+
+        The calling task is tracked so the shutdown job can cancel a sync that
+        is mid-connection; a refusal while latched is not a failure.
+        """
+        if shutdown.in_progress(self.hass):
+            return
+        task = asyncio.current_task()
+        self._inflight.add(task)
+        try:
+            await self._async_sync(reason=reason, units=units)
+        finally:
+            self._inflight.discard(task)
+
+    async def _disconnect(self, client: BleakClientWithServiceCache | None) -> None:
+        """Disconnect one client, bounded, and even if the caller is cancelled.
+
+        The disconnect runs as its own task behind a shield, so cancelling the
+        sync task cannot abandon an open link. Never raises.
+        """
+        if client is None:
+            return
+        if self._client is client:
+            self._client = None
+        task = asyncio.ensure_future(client.disconnect())
+        try:
+            async with asyncio.timeout(STEP_TIMEOUT):
+                await asyncio.shield(task)
+        except Exception:  # noqa: BLE001 - includes the timeout; best effort
+            pass
+
+    async def async_release(self) -> None:
+        """Shutdown: stop any sync in flight and drop any link still held."""
+        current = asyncio.current_task()
+        tasks = [t for t in self._inflight if t is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._disconnect(self._client)
+
+    async def _async_sync(
+        self, *, reason: str = "manual", units: str | None = None
+    ) -> None:
         """One connection: read drift, apply any setting, set the time, verify.
 
         The time write always goes last so it is the authoritative one.
@@ -213,6 +270,7 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
         error: str | None = None
         setting_errors: list[str] = []
         client: BleakClientWithServiceCache | None = None
+        latched = False
 
         try:
             device = self._ble_device()
@@ -220,6 +278,9 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
                 "connect",
                 establish_connection(BleakClientWithServiceCache, device, self.address),
             )
+            self._client = client
+            if shutdown.in_progress(self.hass):
+                raise _Latched
 
             # 1. Measure drift BEFORE correcting: a large value here is the
             #    evidence that the clock was actually wrong, and a small one
@@ -311,14 +372,16 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
                     reason,
                     "unknown" if drift is None else f"{drift:.0f}",
                 )
+        except _Latched:
+            latched = True
         except Exception as err:  # noqa: BLE001 - reported, never raised
             error = str(err)
         finally:
-            if client is not None:
-                try:
-                    await self._bounded("disconnect", client.disconnect())
-                except Exception:  # noqa: BLE001
-                    pass
+            await self._disconnect(client)
+
+        if latched:
+            # Shutdown refusals are not faults: no error recorded, nothing saved.
+            return
 
         if error is None and setting_errors:
             # The clock is right; a knob was refused. Surface it without

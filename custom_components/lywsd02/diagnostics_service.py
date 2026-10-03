@@ -17,6 +17,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, ServiceCall
 
+from . import shutdown
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ async def async_register_services(hass: HomeAssistant) -> None:
             _LOGGER.error("dump_gatt: %s is not reachable through a connectable proxy", address)
             return
 
+        if shutdown.in_progress(hass):
+            _LOGGER.info("dump_gatt: Home Assistant is shutting down; not connecting")
+            return
         client = await establish_connection(BleakClientWithServiceCache, device, address)
         lines: list[str] = [f"GATT table for {address}:"]
         try:
@@ -86,6 +90,9 @@ async def async_register_write_service(hass: HomeAssistant) -> None:
             _LOGGER.error("write_char: %s is not reachable", address)
             return
 
+        if shutdown.in_progress(hass):
+            _LOGGER.info("write_char: Home Assistant is shutting down; not connecting")
+            return
         client = await establish_connection(BleakClientWithServiceCache, device, address)
         try:
             try:
