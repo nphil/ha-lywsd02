@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -35,6 +36,11 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# No single connect / read / write / disconnect may hang longer than this, even
+# though bleak and bleak_retry_connector have no ceiling of their own for
+# several of those calls (startup contract S4).
+STEP_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,9 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
 
     async def async_load(self) -> None:
         self._state = ClockState.from_dict(await self._store.async_load())
+        # Entities render from `state`; seeding `data` lets setup finish without
+        # waiting for a first refresh (which may need a radio connection).
+        self.data = self._state
 
     async def _async_save(self) -> None:
         await self._store.async_save(self._state.as_dict())
@@ -171,6 +180,16 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
             await self.async_sync(reason=why)
         return self._state
 
+    async def _bounded(self, step: str, awaitable):
+        """Await one BLE step, failing after STEP_TIMEOUT instead of hanging."""
+        try:
+            async with asyncio.timeout(STEP_TIMEOUT):
+                return await awaitable
+        except TimeoutError as err:
+            raise TimeoutError(
+                f"{step} did not answer within {STEP_TIMEOUT:g} s"
+            ) from err
+
     def _ble_device(self) -> BLEDevice:
         device = bluetooth.async_ble_device_from_address(
             self.hass, self.address, connectable=True
@@ -197,15 +216,18 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
 
         try:
             device = self._ble_device()
-            client = await establish_connection(
-                BleakClientWithServiceCache, device, self.address
+            client = await self._bounded(
+                "connect",
+                establish_connection(BleakClientWithServiceCache, device, self.address),
             )
 
             # 1. Measure drift BEFORE correcting: a large value here is the
             #    evidence that the clock was actually wrong, and a small one
             #    proves the previous write's byte order was right.
             try:
-                epoch, tz_read = decode_time(await client.read_gatt_char(CHAR_TIME))
+                epoch, tz_read = decode_time(
+                    await self._bounded("read time", client.read_gatt_char(CHAR_TIME))
+                )
                 shown = epoch + tz_read * 3600
                 drift = float(shown - self._target_display_epoch())
             except Exception as err:  # noqa: BLE001 - read is best-effort
@@ -218,8 +240,11 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
             # never cost us the time write, which is this integration's job.
             if units is not None:
                 try:
-                    await client.write_gatt_char(
-                        CHAR_UNITS, encode_units(units), response=True
+                    await self._bounded(
+                        "write units",
+                        client.write_gatt_char(
+                            CHAR_UNITS, encode_units(units), response=True
+                        ),
                     )
                 except Exception as err:  # noqa: BLE001
                     setting_errors.append(f"units not accepted: {err}")
@@ -232,18 +257,26 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
             # accepts an acked write fine, and an ack is worth having, so try
             # that first and fall back rather than assuming either way.
             try:
-                await client.write_gatt_char(CHAR_TIME, payload, response=True)
+                await self._bounded(
+                    "write time",
+                    client.write_gatt_char(CHAR_TIME, payload, response=True),
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "%s: acked time write refused (%s); retrying unacked",
                     self.address, err,
                 )
-                await client.write_gatt_char(CHAR_TIME, payload, response=False)
+                await self._bounded(
+                    "write time (unacked)",
+                    client.write_gatt_char(CHAR_TIME, payload, response=False),
+                )
 
             # 4. Read the unit back - unlike the clock mode, it is readable, so
             #    this is the device's answer rather than our assumption.
             try:
-                target_units = decode_units(await client.read_gatt_char(CHAR_UNITS))
+                target_units = decode_units(
+                    await self._bounded("read units", client.read_gatt_char(CHAR_UNITS))
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("%s: unit read-back failed: %s", self.address, err)
                 target_units = units or self._state.units
@@ -252,7 +285,9 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
             #    that they meant what we intended.
             verified_drift: float | None = None
             try:
-                epoch, tz_read = decode_time(await client.read_gatt_char(CHAR_TIME))
+                epoch, tz_read = decode_time(
+                    await self._bounded("read-back", client.read_gatt_char(CHAR_TIME))
+                )
                 verified_drift = float((epoch + tz_read * 3600) - self._target_display_epoch())
             except Exception as err:  # noqa: BLE001
                 error = f"read-back failed: {err}"
@@ -281,7 +316,7 @@ class Lywsd02Coordinator(DataUpdateCoordinator[ClockState]):
         finally:
             if client is not None:
                 try:
-                    await client.disconnect()
+                    await self._bounded("disconnect", client.disconnect())
                 except Exception:  # noqa: BLE001
                     pass
 

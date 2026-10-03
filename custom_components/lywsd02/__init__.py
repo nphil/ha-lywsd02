@@ -31,9 +31,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_reload))
 
     # Deliberately not syncing during setup: startup is when the proxies are
-    # still coming up, and a failed connect here would only log noise. The
-    # coordinator's first scheduled tick decides whether a sync is due.
-    await coordinator.async_config_entry_first_refresh()
+    # still coming up. The first check (sync if due) runs in a background task
+    # owned by the entry, so setup returns at once however slow or absent the
+    # clock is; entities show the stored last-known state meanwhile, and the
+    # coordinator then keeps its own 30-minute schedule.
+    entry.async_create_background_task(
+        hass, coordinator.async_refresh(), f"{DOMAIN} first check {entry.title}"
+    )
     return True
 
 
