@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parent.parent / "custom_components" / "lywsd02"
+PACKAGE = Path(__file__).resolve().parents[2] / "custom_components" / "lywsd02"
 
 collect_ignore = ["../custom_components"]
 
